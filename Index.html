@@ -1,0 +1,1422 @@
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { 
+  BookOpen, Award, CheckCircle, ChevronRight, Play, RotateCcw, 
+  Table, HelpCircle, Trophy, BarChart2, Check, ArrowRight, ArrowLeft, 
+  Sparkles, Layers, ShieldCheck, Flame, Star, Cpu, Info, Filter,
+  TrendingUp, Download, Eye, Calculator, Search, ChevronDown, List, RefreshCw
+} from 'lucide-react';
+
+// ==========================================
+// SAFE FORMULA PARSER & SPREADSHEET ENGINE
+// ==========================================
+
+const parseCellRef = (refStr) => {
+  const match = refStr.trim().toUpperCase().match(/^([A-Z]+)([0-9]+)$/);
+  if (!match) return null;
+  const colStr = match[1];
+  const rowNum = parseInt(match[2], 10);
+  let colIdx = 0;
+  for (let i = 0; i < colStr.length; i++) {
+    colIdx = colIdx * 26 + (colStr.charCodeAt(i) - 64);
+  }
+  return { col: colIdx - 1, row: rowNum - 1 };
+};
+
+const getCellRefStr = (col, row) => {
+  let colStr = '';
+  let tempCol = col + 1;
+  while (tempCol > 0) {
+    let remainder = (tempCol - 1) % 26;
+    colStr = String.fromCharCode(65 + remainder) + colStr;
+    tempCol = Math.floor((tempCol - remainder) / 26);
+  }
+  return `${colStr}${row + 1}`;
+};
+
+const parseRange = (rangeStr) => {
+  const parts = rangeStr.split(':');
+  if (parts.length === 1) {
+    const c = parseCellRef(parts[0]);
+    return c ? [c] : [];
+  }
+  if (parts.length === 2) {
+    const start = parseCellRef(parts[0]);
+    const end = parseCellRef(parts[1]);
+    if (!start || !end) return [];
+    const minCol = Math.min(start.col, end.col);
+    const maxCol = Math.max(start.col, end.col);
+    const minRow = Math.min(start.row, end.row);
+    const maxRow = Math.max(start.row, end.row);
+    const cells = [];
+    for (let r = minRow; r <= maxRow; r++) {
+      for (let c = minCol; c <= maxCol; c++) {
+        cells.push({ col: c, row: r });
+      }
+    }
+    return cells;
+  }
+  return [];
+};
+
+const evaluateFormula = (formulaStr, gridData) => {
+  if (!formulaStr || typeof formulaStr !== 'string') return formulaStr;
+  if (!formulaStr.startsWith('=')) return formulaStr;
+
+  const rawExpr = formulaStr.substring(1).trim();
+
+  const getVal = (token) => {
+    token = token.trim();
+    if (!token) return 0;
+    if (token.startsWith('"') && token.endsWith('"')) {
+      return token.slice(1, -1);
+    }
+    const num = Number(token);
+    if (!isNaN(num)) return num;
+    
+    const cellPos = parseCellRef(token);
+    if (cellPos) {
+      const cellVal = gridData[cellPos.row]?.[cellPos.col];
+      if (cellVal === undefined || cellVal === null || cellVal === '') return 0;
+      if (typeof cellVal === 'string' && cellVal.startsWith('=')) {
+        return evaluateFormula(cellVal, gridData);
+      }
+      const parsedNum = Number(cellVal);
+      return isNaN(parsedNum) ? cellVal : parsedNum;
+    }
+    return token;
+  };
+
+  const getRangeValues = (argStr) => {
+    const cells = parseRange(argStr);
+    if (cells.length === 0) return [];
+    return cells.map(cell => {
+      const val = gridData[cell.row]?.[cell.col];
+      const parsed = Number(val);
+      return isNaN(parsed) ? 0 : parsed;
+    });
+  };
+
+  try {
+    // Upper case functions matching
+    let expr = rawExpr;
+
+    // Functions processing: SUM, AVERAGE, MIN, MAX
+    const funcRegex = /(SUM|AVERAGE|MIN|MAX|IF)\s*\(([^()]+)\)/i;
+    let match;
+    let guard = 0;
+    while ((match = funcRegex.exec(expr)) && guard < 20) {
+      guard++;
+      const funcName = match[1].toUpperCase();
+      const argBody = match[2];
+
+      if (funcName === 'IF') {
+        const parts = argBody.split(',').map(s => s.trim());
+        if (parts.length >= 2) {
+          const cond = parts[0];
+          const trueVal = getVal(parts[1]);
+          const falseVal = parts[2] ? getVal(parts[2]) : '';
+          
+          let resCond = false;
+          if (cond.includes('>=')) {
+            const [l, r] = cond.split('>=');
+            resCond = Number(getVal(l)) >= Number(getVal(r));
+          } else if (cond.includes('<=')) {
+            const [l, r] = cond.split('<=');
+            resCond = Number(getVal(l)) <= Number(getVal(r));
+          } else if (cond.includes('>')) {
+            const [l, r] = cond.split('>');
+            resCond = Number(getVal(l)) > Number(getVal(r));
+          } else if (cond.includes('<')) {
+            const [l, r] = cond.split('<');
+            resCond = Number(getVal(l)) < Number(getVal(r));
+          } else if (cond.includes('=')) {
+            const [l, r] = cond.split('=');
+            resCond = String(getVal(l)) === String(getVal(r));
+          }
+          
+          const finalVal = resCond ? trueVal : falseVal;
+          expr = expr.replace(match[0], typeof finalVal === 'string' ? `"${finalVal}"` : finalVal);
+          continue;
+        }
+      }
+
+      // Numerical range functions
+      const vals = getRangeValues(argBody);
+      let res = 0;
+      if (funcName === 'SUM') {
+        res = vals.reduce((a, b) => a + b, 0);
+      } else if (funcName === 'AVERAGE') {
+        res = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 0;
+      } else if (funcName === 'MIN') {
+        res = vals.length ? Math.min(...vals) : 0;
+      } else if (funcName === 'MAX') {
+        res = vals.length ? Math.max(...vals) : 0;
+      }
+      expr = expr.replace(match[0], res);
+    }
+
+    // Arithmetic parsing (+, -, *, /)
+    const tokens = expr.split(/([+\-*/])/).map(t => t.trim());
+    if (tokens.length === 1) {
+      return getVal(tokens[0]);
+    }
+
+    // Process * and /
+    let i = 0;
+    while (i < tokens.length) {
+      if (tokens[i] === '*' || tokens[i] === '/') {
+        const left = Number(getVal(tokens[i - 1]));
+        const right = Number(getVal(tokens[i + 1]));
+        if (tokens[i] === '/' && right === 0) return '#DIV/0!';
+        const res = tokens[i] === '*' ? left * right : left / right;
+        tokens.splice(i - 1, 3, res);
+        i = 0;
+      } else {
+        i++;
+      }
+    }
+
+    // Process + and -
+    i = 0;
+    while (i < tokens.length) {
+      if (tokens[i] === '+' || tokens[i] === '-') {
+        const left = Number(getVal(tokens[i - 1]));
+        const right = Number(getVal(tokens[i + 1]));
+        const res = tokens[i] === '+' ? left + right : left - right;
+        tokens.splice(i - 1, 3, res);
+        i = 0;
+      } else {
+        i++;
+      }
+    }
+
+    const result = tokens[0];
+    if (typeof result === 'number' && !isNaN(result)) {
+      return Number.isInteger(result) ? result : parseFloat(result.toFixed(2));
+    }
+    return result;
+  } catch (err) {
+    return '#VALUE!';
+  }
+};
+
+// ==========================================
+// BADGES DATA
+// ==========================================
+const BADGES = [
+  { id: 'data_explorer', title: 'Data Explorer', icon: Search, desc: 'Memahami konsep dasar & komponen Excel', score: 100 },
+  { id: 'excel_beginner', title: 'Excel Beginner', icon: Table, desc: 'Menguasai pengelolaan & filter tabel', score: 300 },
+  { id: 'formula_master', title: 'Formula Master', icon: Calculator, desc: 'Mahir menggunakan operasi matematika & SUM', score: 600 },
+  { id: 'data_analyst', title: 'Data Analyst', icon: BarChart2, desc: 'Menguasai fungsi statistik (AVG, MIN, MAX) & IF', score: 1000 },
+  { id: 'excel_champion', title: 'Excel Champion', icon: Trophy, desc: 'Menyelesaikan seluruh tantangan Kantin Sekolah', score: 1500 }
+];
+
+// ==========================================
+// MAIN COMPONENT
+// ==========================================
+export default function App() {
+  // Navigation & User State
+  const [activeTab, setActiveTab] = useState('home');
+  const [points, setPoints] = useState(() => {
+    return parseInt(localStorage.getItem('eda_points') || '0', 10);
+  });
+  const [completedMissions, setCompletedMissions] = useState(() => {
+    return JSON.parse(localStorage.getItem('eda_completed') || '[]');
+  });
+
+  // Save to LocalStorage
+  useEffect(() => {
+    localStorage.setItem('eda_points', points.toString());
+    localStorage.setItem('eda_completed', JSON.stringify(completedMissions));
+  }, [points, completedMissions]);
+
+  const addPoints = (pts, missionId) => {
+    setPoints(prev => prev + pts);
+    if (missionId && !completedMissions.includes(missionId)) {
+      setCompletedMissions(prev => [...prev, missionId]);
+    }
+  };
+
+  const isMissionComplete = (id) => completedMissions.includes(id);
+
+  const calculateLevel = (pts) => {
+    if (pts >= 1500) return { level: 5, title: 'Excel Master Champion', progress: 100 };
+    if (pts >= 1000) return { level: 4, title: 'Senior Data Analyst', progress: ((pts - 1000) / 500) * 100 };
+    if (pts >= 600) return { level: 3, title: 'Formula Wizard', progress: ((pts - 600) / 400) * 100 };
+    if (pts >= 300) return { level: 2, title: 'Data Junior Operator', progress: ((pts - 300) / 300) * 100 };
+    return { level: 1, title: 'Data Explorer Apprentice', progress: (pts / 300) * 100 };
+  };
+
+  const levelInfo = calculateLevel(points);
+
+  const navItems = [
+    { id: 'home', title: 'Beranda Utama', icon: BookOpen },
+    { id: 'm1', title: '1. Mengenal Analisis Data', icon: Eye },
+    { id: 'm2', title: '2. Menyimpan & Memfilter Data', icon: Filter },
+    { id: 'm3', title: '3. Excel sebagai Kalkulator', icon: Calculator },
+    { id: 'm4', title: '4. Fungsi SUM', icon: Layers },
+    { id: 'm5', title: '5. AVERAGE, MIN, MAX', icon: BarChart2 },
+    { id: 'm6', title: '6. Logika Fungsi IF', icon: Cpu },
+    { id: 'm7', title: '7. Final Challenge Kantin', icon: Trophy },
+  ];
+
+  return (
+    <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col font-sans">
+      {/* Top Header */}
+      <header className="bg-slate-800 border-b border-slate-700 px-4 py-3 sticky top-0 z-50 flex flex-wrap items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <div className="bg-emerald-500 p-2 rounded-xl text-slate-950 font-black flex items-center justify-center shadow-lg shadow-emerald-500/20">
+            <Table className="w-6 h-6" />
+          </div>
+          <div>
+            <h1 className="font-extrabold text-lg tracking-wide text-white flex items-center gap-2">
+              EXCEL DATA ADVENTURE
+              <span className="bg-amber-400/20 text-amber-300 text-xs px-2 py-0.5 rounded-full border border-amber-400/30 font-medium">SMP Kelas 8</span>
+            </h1>
+            <p className="text-xs text-slate-400">Misi Menjadi Ahli Analisis Data Informatika</p>
+          </div>
+        </div>
+
+        {/* Stats & Progress */}
+        <div className="flex items-center gap-6">
+          {/* Level Badge */}
+          <div className="hidden sm:flex items-center gap-2 bg-slate-900/80 px-3 py-1.5 rounded-lg border border-slate-700">
+            <Flame className="w-5 h-5 text-amber-400 animate-pulse" />
+            <div>
+              <p className="text-[10px] text-slate-400 font-semibold uppercase">Level {levelInfo.level}</p>
+              <p className="text-xs font-bold text-amber-300">{levelInfo.title}</p>
+            </div>
+          </div>
+
+          {/* Points */}
+          <div className="flex items-center gap-2 bg-slate-900/80 px-3 py-1.5 rounded-lg border border-slate-700">
+            <Star className="w-5 h-5 text-yellow-400 fill-yellow-400" />
+            <div>
+              <p className="text-[10px] text-slate-400 font-semibold uppercase">Total Poin</p>
+              <p className="text-xs font-bold text-emerald-400">{points} XP</p>
+            </div>
+          </div>
+
+          {/* Progress Bar */}
+          <div className="hidden md:block w-36">
+            <div className="flex justify-between text-[10px] text-slate-400 mb-1">
+              <span>Progres Belajar</span>
+              <span>{completedMissions.length}/7 Misi</span>
+            </div>
+            <div className="w-full bg-slate-700 h-2 rounded-full overflow-hidden">
+              <div 
+                className="bg-emerald-400 h-full transition-all duration-500 ease-out" 
+                style={{ width: `${(completedMissions.length / 7) * 100}%` }}
+              ></div>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      {/* Main Layout */}
+      <div className="flex flex-1 overflow-hidden">
+        {/* Sidebar */}
+        <aside className="w-64 bg-slate-800/90 border-r border-slate-700 flex flex-col justify-between hidden lg:flex">
+          <div className="p-3 space-y-1 overflow-y-auto">
+            <p className="text-[11px] font-bold text-slate-400 px-3 py-2 uppercase tracking-wider">Modul & Misi</p>
+            {navItems.map((item, idx) => {
+              const Icon = item.icon;
+              const isCompleted = isMissionComplete(item.id);
+              const isActive = activeTab === item.id;
+              return (
+                <button
+                  key={item.id}
+                  onClick={() => setActiveTab(item.id)}
+                  className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-xs font-medium transition-all ${
+                    isActive 
+                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-semibold shadow-sm' 
+                      : 'text-slate-300 hover:bg-slate-700/50 hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5">
+                    <Icon className={`w-4 h-4 ${isActive ? 'text-emerald-400' : 'text-slate-400'}`} />
+                    <span className="truncate">{item.title}</span>
+                  </div>
+                  {isCompleted && <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0" />}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Badges Box */}
+          <div className="p-3 border-t border-slate-700 bg-slate-900/50">
+            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">Lencana Terbuka</p>
+            <div className="flex gap-2 justify-center">
+              {BADGES.map((badge) => {
+                const unlocked = points >= badge.score;
+                const BIcon = badge.icon;
+                return (
+                  <div 
+                    key={badge.id}
+                    title={`${badge.title}: ${badge.desc} (${badge.score} XP)`}
+                    className={`p-2 rounded-lg border text-center transition-all ${
+                      unlocked 
+                        ? 'bg-amber-400/10 border-amber-400/30 text-amber-300 shadow-sm shadow-amber-400/10' 
+                        : 'bg-slate-800 border-slate-700 text-slate-600 opacity-40'
+                    }`}
+                  >
+                    <BIcon className="w-4 h-4 mx-auto" />
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </aside>
+
+        {/* Mobile Navbar Bottom */}
+        <div className="lg:hidden fixed bottom-0 left-0 right-0 bg-slate-800 border-t border-slate-700 z-40 flex overflow-x-auto p-2 gap-2">
+          {navItems.map((item) => (
+            <button
+              key={item.id}
+              onClick={() => setActiveTab(item.id)}
+              className={`px-3 py-1.5 rounded-lg text-xs whitespace-nowrap flex items-center gap-1.5 shrink-0 ${
+                activeTab === item.id ? 'bg-emerald-500 text-slate-950 font-bold' : 'bg-slate-700 text-slate-300'
+              }`}
+            >
+              {item.title}
+            </button>
+          ))}
+        </div>
+
+        {/* Main Content Area */}
+        <main className="flex-1 overflow-y-auto p-4 md:p-6 lg:p-8 bg-slate-900 pb-20 lg:pb-8">
+          <div className="max-w-5xl mx-auto space-y-6">
+            {activeTab === 'home' && <HomeView onStart={() => setActiveTab('m1')} addPoints={addPoints} points={points} completed={completedMissions} />}
+            {activeTab === 'm1' && <Mission1View onNext={() => setActiveTab('m2')} addPoints={addPoints} completed={isMissionComplete('m1')} />}
+            {activeTab === 'm2' && <Mission2View onNext={() => setActiveTab('m3')} addPoints={addPoints} completed={isMissionComplete('m2')} />}
+            {activeTab === 'm3' && <Mission3View onNext={() => setActiveTab('m4')} addPoints={addPoints} completed={isMissionComplete('m3')} />}
+            {activeTab === 'm4' && <Mission4View onNext={() => setActiveTab('m5')} addPoints={addPoints} completed={isMissionComplete('m4')} />}
+            {activeTab === 'm5' && <Mission5View onNext={() => setActiveTab('m6')} addPoints={addPoints} completed={isMissionComplete('m5')} />}
+            {activeTab === 'm6' && <Mission6View onNext={() => setActiveTab('m7')} addPoints={addPoints} completed={isMissionComplete('m6')} />}
+            {activeTab === 'm7' && <Mission7View addPoints={addPoints} completed={isMissionComplete('m7')} />}
+          </div>
+        </main>
+      </div>
+    </div>
+  );
+}
+
+// ==========================================
+// REUSABLE INTERACTIVE EXCEL GRID COMPONENT
+// ==========================================
+function InteractiveExcelGrid({ 
+  initialData, 
+  columns = ['A', 'B', 'C', 'D', 'E'], 
+  rowCount = 6, 
+  onCellChange, 
+  challengeCheck, 
+  title = "Simulator Microsoft Excel" 
+}) {
+  const [grid, setGrid] = useState(() => {
+    const defaultGrid = Array(rowCount).fill(null).map(() => Array(columns.length).fill(''));
+    if (initialData) {
+      initialData.forEach((row, rIdx) => {
+        row.forEach((val, cIdx) => {
+          if (rIdx < rowCount && cIdx < columns.length) {
+            defaultGrid[rIdx][cIdx] = String(val);
+          }
+        });
+      });
+    }
+    return defaultGrid;
+  });
+
+  const [selectedCell, setSelectedCell] = useState({ col: 0, row: 0 });
+  const [editingValue, setEditingValue] = useState('');
+
+  // Sync editing value with active cell
+  useEffect(() => {
+    setEditingValue(grid[selectedCell.row]?.[selectedCell.col] || '');
+  }, [selectedCell, grid]);
+
+  const handleCellClick = (r, c) => {
+    setSelectedCell({ col: c, row: r });
+  };
+
+  const handleInputChange = (val) => {
+    setEditingValue(val);
+    const newGrid = grid.map(row => [...row]);
+    newGrid[selectedCell.row][selectedCell.col] = val;
+    setGrid(newGrid);
+    if (onCellChange) onCellChange(newGrid);
+  };
+
+  const computedGrid = useMemo(() => {
+    return grid.map(row => {
+      return row.map(cellVal => {
+        if (typeof cellVal === 'string' && cellVal.startsWith('=')) {
+          return evaluateFormula(cellVal, grid);
+        }
+        return cellVal;
+      });
+    });
+  }, [grid]);
+
+  const activeCellRef = getCellRefStr(selectedCell.col, selectedCell.row);
+
+  return (
+    <div className="bg-slate-800 border border-slate-700 rounded-xl shadow-xl overflow-hidden my-4">
+      {/* Title & Toolbar */}
+      <div className="bg-slate-900/90 px-4 py-2.5 border-b border-slate-700 flex items-center justify-between text-xs">
+        <span className="font-bold text-emerald-400 flex items-center gap-2">
+          <Table className="w-4 h-4" /> {title}
+        </span>
+        <span className="text-slate-400 text-[11px]">Mode Interaktif Aktif</span>
+      </div>
+
+      {/* Name Box & Formula Bar */}
+      <div className="flex items-center gap-2 p-2 bg-slate-850 border-b border-slate-700 text-xs">
+        <div className="w-16 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-center font-mono font-bold text-amber-300">
+          {activeCellRef}
+        </div>
+        <div className="text-slate-400 font-serif italic px-1 font-bold">fx</div>
+        <input 
+          type="text" 
+          value={editingValue} 
+          onChange={(e) => handleInputChange(e.target.value)}
+          placeholder="Ketik angka, teks, atau rumus (misal: =A1+B1 atau =SUM(A1:A5))..."
+          className="flex-1 bg-slate-900 border border-slate-700 rounded px-3 py-1 font-mono text-white focus:outline-none focus:border-emerald-500"
+        />
+      </div>
+
+      {/* Spreadsheet Grid */}
+      <div className="overflow-x-auto">
+        <table className="w-full border-collapse text-xs font-mono">
+          <thead>
+            <tr className="bg-slate-900 text-slate-400">
+              <th className="w-10 border border-slate-700 p-1.5 text-center font-normal">#</th>
+              {columns.map((col, idx) => (
+                <th key={col} className={`border border-slate-700 p-1.5 text-center font-bold ${selectedCell.col === idx ? 'bg-emerald-500/10 text-emerald-300' : ''}`}>
+                  {col}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {grid.map((row, rIdx) => (
+              <tr key={rIdx} className="hover:bg-slate-750">
+                <td className={`border border-slate-700 p-1.5 text-center text-slate-500 ${selectedCell.row === rIdx ? 'bg-emerald-500/10 text-emerald-300 font-bold' : ''}`}>
+                  {rIdx + 1}
+                </td>
+                {row.map((cellRawVal, cIdx) => {
+                  const isSelected = selectedCell.col === cIdx && selectedCell.row === rIdx;
+                  const displayVal = computedGrid[rIdx][cIdx];
+                  const isFormula = String(cellRawVal).startsWith('=');
+
+                  return (
+                    <td
+                      key={cIdx}
+                      onClick={() => handleCellClick(rIdx, cIdx)}
+                      className={`border border-slate-700 p-2 min-w-[90px] h-9 cursor-pointer transition-all relative ${
+                        isSelected 
+                          ? 'bg-emerald-500/20 ring-2 ring-emerald-500 z-10 text-white font-semibold' 
+                          : 'bg-slate-800/60 hover:bg-slate-700/50 text-slate-200'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between w-full h-full">
+                        <span className="truncate">{displayVal !== undefined ? displayVal : ''}</span>
+                        {isFormula && <span className="text-[9px] text-amber-400 font-mono ml-1">fx</span>}
+                      </div>
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Challenge Status Bar */}
+      {challengeCheck && (
+        <div className="bg-slate-900/80 p-3 border-t border-slate-700 flex flex-wrap items-center justify-between gap-2">
+          {challengeCheck(grid, computedGrid)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ==========================================
+// VIEWS FOR EACH MISSION
+// ==========================================
+
+// --- HOME VIEW ---
+function HomeView({ onStart, points, completed }) {
+  return (
+    <div className="space-y-8 animate-fadeIn">
+      {/* Banner */}
+      <div className="relative overflow-hidden rounded-2xl bg-gradient-to-r from-slate-800 via-indigo-950 to-slate-900 border border-slate-700 p-6 md:p-8 shadow-2xl">
+        <div className="relative z-10 space-y-4 max-w-2xl">
+          <span className="inline-flex items-center gap-1.5 bg-emerald-500/20 text-emerald-300 text-xs font-bold px-3 py-1 rounded-full border border-emerald-500/30">
+            <Sparkles className="w-3.5 h-3.5" /> Media Pembelajaran Informatika Kelas VIII SMP
+          </span>
+          <h1 className="text-3xl md:text-4xl font-extrabold text-white tracking-tight leading-tight">
+            EXCEL DATA ADVENTURE
+          </h1>
+          <p className="text-slate-300 text-sm md:text-base leading-relaxed">
+            Selamat datang di petualangan olah data! Di sini kamu akan belajar konsep dasar analisis data, 
+            mengoperasikan tabel Microsoft Excel, hingga memecahkan tantangan riil pengolahan kantin sekolah!
+          </p>
+          <div className="pt-2 flex flex-wrap gap-4">
+            <button 
+              onClick={onStart} 
+              className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold px-6 py-3 rounded-xl shadow-lg shadow-emerald-500/25 flex items-center gap-2 transition-all transform hover:-translate-y-0.5"
+            >
+              <Play className="w-5 h-5 fill-slate-950" /> MULAI BELAJAR SEKARANG
+            </button>
+          </div>
+        </div>
+        <div className="absolute -right-10 -bottom-10 opacity-15 pointer-events-none">
+          <Table className="w-96 h-96 text-emerald-400" />
+        </div>
+      </div>
+
+      {/* Progress Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 flex items-center gap-4">
+          <div className="p-3 bg-amber-400/10 text-amber-400 rounded-lg">
+            <Trophy className="w-6 h-6" />
+          </div>
+          <div>
+            <p className="text-xs text-slate-400 font-medium">Total Skor Pengalaman</p>
+            <p className="text-xl font-bold text-amber-300">{points} XP</p>
+          </div>
+        </div>
+        <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 flex items-center gap-4">
+          <div className="p-3 bg-emerald-400/10 text-emerald-400 rounded-lg">
+            <CheckCircle className="w-6 h-6" />
+          </div>
+          <div>
+            <p className="text-xs text-slate-400 font-medium">Misi Tuntas</p>
+            <p className="text-xl font-bold text-emerald-400">{completed.length} dari 7 Misi</p>
+          </div>
+        </div>
+        <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 flex items-center gap-4">
+          <div className="p-3 bg-indigo-400/10 text-indigo-400 rounded-lg">
+            <Award className="w-6 h-6" />
+          </div>
+          <div>
+            <p className="text-xs text-slate-400 font-medium">Lencana Diraih</p>
+            <p className="text-xl font-bold text-indigo-300">
+              {BADGES.filter(b => points >= b.score).length} / {BADGES.length} Badges
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* Missions Map */}
+      <div className="space-y-4">
+        <h2 className="text-lg font-bold text-white flex items-center gap-2">
+          <List className="w-5 h-5 text-emerald-400" /> Peta Misi Pembelajaran
+        </h2>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {[
+            { id: 'm1', title: '1. Mengenal Analisis Data', desc: 'Konsep data, jenis-jenis data, dan anatomi komponen Microsoft Excel.', xp: 100 },
+            { id: 'm2', title: '2. Menyimpan & Memfilter Data', desc: 'Simulasi pengelolaan data terstruktur, pengurutan, dan penyaringan (Filter).', xp: 200 },
+            { id: 'm3', title: '3. Excel sebagai Kalkulator', desc: 'Operasi matematika (+, -, *, /) serta penulisan rumus diawali =.', xp: 300 },
+            { id: 'm4', title: '4. Fungsi SUM', desc: 'Penjumlahan otomatis rentang data dengan fungsi SUM.', xp: 400 },
+            { id: 'm5', title: '5. AVERAGE, MIN, MAX', desc: 'Analisis statistik: nilai rata-rata, terkecil, dan terbesar.', xp: 500 },
+            { id: 'm6', title: '6. Logika Fungsi IF', desc: 'Pengambilan keputusan otomatis berdasarkan kondisi (IF sederhana & bertingkat).', xp: 600 },
+            { id: 'm7', title: '7. Final Challenge: Kantin Sekolah', desc: 'Proyek gabungan mengolah & menganalisis data penjualan kantin sekolah.', xp: 800 }
+          ].map((m) => {
+            const isDone = completed.includes(m.id);
+            return (
+              <div 
+                key={m.id} 
+                className={`p-4 rounded-xl border transition-all flex justify-between items-start ${
+                  isDone 
+                    ? 'bg-emerald-950/20 border-emerald-500/40' 
+                    : 'bg-slate-800 border-slate-700 hover:border-slate-600'
+                }`}
+              >
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <h3 className="font-bold text-sm text-white">{m.title}</h3>
+                    {isDone && <span className="bg-emerald-500/20 text-emerald-300 text-[10px] px-2 py-0.5 rounded-full border border-emerald-500/30 font-bold">Selesai</span>}
+                  </div>
+                  <p className="text-xs text-slate-400">{m.desc}</p>
+                </div>
+                <span className="text-xs font-bold text-amber-400 bg-amber-400/10 px-2.5 py-1 rounded-lg shrink-0">
+                  +{m.xp} XP
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// --- MISSION 1 VIEW ---
+function Mission1View({ onNext, addPoints, completed }) {
+  const [activeTooltip, setActiveTooltip] = useState(null);
+
+  const initialSimulatorData = [
+    ['', '', ''],
+    ['', '', ''],
+    ['', '', '']
+  ];
+
+  const excelComponents = [
+    { name: 'Title Bar', desc: 'Menampilkan nama dokumen yang sedang dibuka.' },
+    { name: 'Ribbon', desc: 'Kumpulan menu dan alat kerja (Insert, Formulas, dll).' },
+    { name: 'Name Box', desc: 'Menunjukkan alamat sel yang sedang aktif (misal A1).' },
+    { name: 'Formula Bar', desc: 'Tempat mengetik atau melihat isi rumus di dalam sel.' },
+    { name: 'Column Heading', desc: 'Nama kolom yang ditandai dengan Huruf (A, B, C...).' },
+    { name: 'Row Heading', desc: 'Nomor baris yang ditandai dengan Angka (1, 2, 3...).' }
+  ];
+
+  return (
+    <div className="space-y-6 animate-fadeIn">
+      {/* Header */}
+      <div className="border-b border-slate-700 pb-4">
+        <span className="text-xs font-bold text-emerald-400 uppercase tracking-wider">HALAMAN 1</span>
+        <h1 className="text-2xl font-bold text-white">Mengenal Analisis Data & Microsoft Excel</h1>
+      </div>
+
+      {/* Theory A & B */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 space-y-3">
+          <h3 className="font-bold text-amber-300 flex items-center gap-2 text-sm">
+            <BookOpen className="w-4 h-4" /> A. Pengertian Data & Analisis Data
+          </h3>
+          <p className="text-xs text-slate-300 leading-relaxed">
+            <strong className="text-white">Data</strong> adalah kumpulan fakta mentah berupa angka, kata-kata, atau gambar. 
+            <strong className="text-white"> Analisis Data</strong> adalah proses mengolah data mentah tersebut agar memberikan informasi yang berguna untuk mengambil keputusan.
+          </p>
+        </div>
+        <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 space-y-3">
+          <h3 className="font-bold text-emerald-300 flex items-center gap-2 text-sm">
+            <Layers className="w-4 h-4" /> B. Macam-Macam Data SMP
+          </h3>
+          <ul className="text-xs text-slate-300 space-y-1.5 list-disc pl-4">
+            <li><strong className="text-white">Kualitatif (Teks):</strong> Hobi murid (Membaca, Basket).</li>
+            <li><strong className="text-white">Kuantitatif (Angka):</strong> Nilai ulangan matematika (85, 90).</li>
+            <li><strong className="text-white">Diskrit (Utuh):</strong> Jumlah saudara (2 orang, 3 orang).</li>
+            <li><strong className="text-white">Kontinu (Pecahan/Ukur):</strong> Tinggi badan (155.5 cm).</li>
+          </ul>
+        </div>
+      </div>
+
+      {/* Interactive UI Explorer */}
+      <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 space-y-4">
+        <h3 className="font-bold text-white text-sm flex items-center gap-2">
+          <Info className="w-4 h-4 text-emerald-400" /> Bagian-Bagian Utama Microsoft Excel (Klik untuk Detail)
+        </h3>
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+          {excelComponents.map((comp) => (
+            <button
+              key={comp.name}
+              onClick={() => setActiveTooltip(comp)}
+              className={`p-3 rounded-lg border text-left text-xs font-semibold transition-all ${
+                activeTooltip?.name === comp.name
+                  ? 'bg-emerald-500/20 border-emerald-500 text-emerald-300'
+                  : 'bg-slate-900 border-slate-700 text-slate-300 hover:border-slate-500'
+              }`}
+            >
+              {comp.name}
+            </button>
+          ))}
+        </div>
+        {activeTooltip && (
+          <div className="bg-emerald-950/30 border border-emerald-500/40 p-3 rounded-lg text-xs text-emerald-200 animate-fadeIn">
+            <strong>{activeTooltip.name}:</strong> {activeTooltip.desc}
+          </div>
+        )}
+      </div>
+
+      {/* Excel Simulator Challenge */}
+      <div className="space-y-3">
+        <h3 className="font-bold text-white text-base">F. EXCEL SIMULATOR CHALLENGE</h3>
+        <p className="text-xs text-slate-300">
+          Ikuti instruksi berikut pada simulator di bawah ini:
+          <br />1. Masukkan kata <code className="bg-slate-800 text-amber-300 px-1 rounded">Nama</code> ke cell <strong>A1</strong>
+          <br />2. Masukkan kata <code className="bg-slate-800 text-amber-300 px-1 rounded">Nilai</code> ke cell <strong>B1</strong>
+          <br />3. Masukkan nama kamu ke cell <strong>A2</strong>
+          <br />4. Masukkan angka <code className="bg-slate-800 text-amber-300 px-1 rounded">85</code> ke cell <strong>B2</strong>
+        </p>
+
+        <InteractiveExcelGrid 
+          initialData={initialSimulatorData}
+          columns={['A', 'B', 'C']}
+          rowCount={3}
+          challengeCheck={(grid) => {
+            const c1 = grid[0]?.[0]?.trim().toLowerCase() === 'nama';
+            const c2 = grid[0]?.[1]?.trim().toLowerCase() === 'nilai';
+            const c3 = grid[1]?.[0]?.trim().length > 0;
+            const c4 = grid[1]?.[1]?.trim() === '85';
+
+            const allDone = c1 && c2 && c3 && c4;
+
+            return (
+              <div className="w-full flex items-center justify-between">
+                <div className="flex items-center gap-2 text-xs">
+                  {allDone ? (
+                    <span className="text-emerald-400 font-bold flex items-center gap-1">
+                      <CheckCircle className="w-4 h-4" /> Tantangan Berhasil Dituntaskan!
+                    </span>
+                  ) : (
+                    <span className="text-amber-400 text-[11px]">
+                      Progress: {[c1, c2, c3, c4].filter(Boolean).length} / 4 Tugas Selesai
+                    </span>
+                  )}
+                </div>
+                {allDone && !completed && (
+                  <button 
+                    onClick={() => addPoints(100, 'm1')}
+                    className="bg-emerald-500 text-slate-950 font-bold px-3 py-1 rounded text-xs shadow hover:bg-emerald-400"
+                  >
+                    Klaim +100 XP
+                  </button>
+                )}
+              </div>
+            );
+          }}
+        />
+      </div>
+
+      {/* Navigation Footer */}
+      <div className="flex justify-end pt-4 border-t border-slate-700">
+        <button 
+          onClick={onNext}
+          className="bg-slate-800 hover:bg-slate-700 text-white font-bold px-5 py-2.5 rounded-xl border border-slate-600 flex items-center gap-2 text-xs"
+        >
+          Lanjut ke Misi 2 <ArrowRight className="w-4 h-4" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// --- MISSION 2 VIEW ---
+function Mission2View({ onNext, addPoints, completed }) {
+  const [salesData, setSalesData] = useState([
+    { id: 1, nama: 'Buku Tulis', jumlah: 5, harga: 5000 },
+    { id: 2, nama: 'Pulpen', jumlah: 10, harga: 3000 },
+    { id: 3, nama: 'Pensil', jumlah: 8, harga: 2500 },
+    { id: 4, nama: 'Penghapus', jumlah: 6, harga: 2000 },
+    { id: 5, nama: 'Penggaris', jumlah: 4, harga: 4000 },
+    { id: 6, nama: 'Spidol', jumlah: 3, harga: 7000 },
+    { id: 7, nama: 'Buku Gambar', jumlah: 5, harga: 6000 },
+    { id: 8, nama: 'Rautan', jumlah: 7, harga: 2500 },
+    { id: 9, nama: 'Map Plastik', jumlah: 4, harga: 3500 },
+    { id: 10, nama: 'Stabilo', jumlah: 2, harga: 8000 }
+  ]);
+
+  const [filterMoreThan5, setFilterMoreThan5] = useState(false);
+  const [sortOrder, setSortOrder] = useState(null); // 'asc' | 'desc'
+  const [challengePassed, setChallengePassed] = useState(false);
+
+  const displayData = useMemo(() => {
+    let res = [...salesData];
+    if (filterMoreThan5) {
+      res = res.filter(item => item.jumlah > 5);
+    }
+    if (sortOrder === 'asc') {
+      res.sort((a, b) => a.jumlah - b.jumlah);
+    } else if (sortOrder === 'desc') {
+      res.sort((a, b) => b.jumlah - a.jumlah);
+    }
+    return res;
+  }, [salesData, filterMoreThan5, sortOrder]);
+
+  const handleQtyChange = (id, newQty) => {
+    const val = parseInt(newQty, 10) || 0;
+    setSalesData(prev => prev.map(item => item.id === id ? { ...item, jumlah: val } : item));
+  };
+
+  const checkFilterChallenge = () => {
+    if (filterMoreThan5) {
+      setChallengePassed(true);
+      if (!completed) addPoints(200, 'm2');
+    }
+  };
+
+  return (
+    <div className="space-y-6 animate-fadeIn">
+      {/* Header */}
+      <div className="border-b border-slate-700 pb-4">
+        <span className="text-xs font-bold text-emerald-400 uppercase tracking-wider">HALAMAN 2</span>
+        <h1 className="text-2xl font-bold text-white">Menyimpan dan Memfilter Data</h1>
+      </div>
+
+      <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 space-y-2">
+        <h3 className="font-bold text-amber-300 text-sm">Penyimpanan & Pengolahan Data Terstruktur</h3>
+        <p className="text-xs text-slate-300 leading-relaxed">
+          Dalam Excel, data disimpan dalam tabel terstruktur berbaris dan berkolom. 
+          Fitur <strong className="text-white">Filter</strong> memungkinkan kita menyaring data yang memenuhi kriteria tertentu, 
+          dan fitur <strong className="text-white">Sort</strong> digunakan untuk mengurutkan angka atau teks secara teratur.
+        </p>
+      </div>
+
+      {/* Dynamic Interactive Table */}
+      <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h3 className="font-bold text-white text-sm flex items-center gap-2">
+            <Table className="w-4 h-4 text-emerald-400" /> Simulator Tabel Penjualan Koperasi Sekolah
+          </h3>
+          {/* Controls */}
+          <div className="flex flex-wrap gap-2 text-xs">
+            <button
+              onClick={() => {
+                setFilterMoreThan5(!filterMoreThan5);
+                if (!filterMoreThan5) checkFilterChallenge();
+              }}
+              className={`px-3 py-1.5 rounded-lg border flex items-center gap-1.5 font-semibold transition-all ${
+                filterMoreThan5 
+                  ? 'bg-emerald-500 text-slate-950 border-emerald-400' 
+                  : 'bg-slate-700 text-slate-200 border-slate-600 hover:bg-slate-600'
+              }`}
+            >
+              <Filter className="w-3.5 h-3.5" /> Filter Jumlah &gt; 5
+            </button>
+            <button
+              onClick={() => setSortOrder('asc')}
+              className={`px-3 py-1.5 rounded-lg border font-semibold ${sortOrder === 'asc' ? 'bg-indigo-500 text-white' : 'bg-slate-700 text-slate-200 border-slate-600'}`}
+            >
+              Sort Terkecil
+            </button>
+            <button
+              onClick={() => setSortOrder('desc')}
+              className={`px-3 py-1.5 rounded-lg border font-semibold ${sortOrder === 'desc' ? 'bg-indigo-500 text-white' : 'bg-slate-700 text-slate-200 border-slate-600'}`}
+            >
+              Sort Terbesar
+            </button>
+            <button
+              onClick={() => { setFilterMoreThan5(false); setSortOrder(null); }}
+              className="px-3 py-1.5 rounded-lg bg-slate-900 text-slate-400 border border-slate-700 hover:text-white"
+            >
+              Reset Filter
+            </button>
+          </div>
+        </div>
+
+        {/* Table */}
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs text-left border-collapse">
+            <thead>
+              <tr className="bg-slate-900 text-slate-300 border-b border-slate-700 font-mono">
+                <th className="p-2.5">No</th>
+                <th className="p-2.5">Nama Barang</th>
+                <th className="p-2.5">Jumlah Terjual</th>
+                <th className="p-2.5">Harga Satuan</th>
+                <th className="p-2.5 text-emerald-400">Total (Otomatis)</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-700 font-mono">
+              {displayData.map((item) => (
+                <tr key={item.id} className="hover:bg-slate-750">
+                  <td className="p-2.5 text-slate-400">{item.id}</td>
+                  <td className="p-2.5 font-semibold text-white">{item.nama}</td>
+                  <td className="p-2.5">
+                    <input 
+                      type="number" 
+                      value={item.jumlah}
+                      onChange={(e) => handleQtyChange(item.id, e.target.value)}
+                      className="w-16 bg-slate-900 border border-slate-600 rounded px-2 py-0.5 text-amber-300 focus:outline-none"
+                    />
+                  </td>
+                  <td className="p-2.5 text-slate-300">Rp {item.harga.toLocaleString()}</td>
+                  <td className="p-2.5 font-bold text-emerald-400">
+                    Rp {(item.jumlah * item.harga).toLocaleString()}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Challenge Box */}
+        <div className="bg-slate-900 p-3 rounded-lg border border-slate-700 flex items-center justify-between">
+          <div className="text-xs">
+            <span className="font-bold text-amber-300">Tantangan Misi 2:</span> Aktifkan filter 
+            <strong className="text-white"> "Jumlah &gt; 5"</strong> untuk menyaring barang laris!
+          </div>
+          {challengePassed ? (
+            <span className="text-emerald-400 font-bold text-xs flex items-center gap-1">
+              <CheckCircle className="w-4 h-4" /> Berhasil! (+200 XP)
+            </span>
+          ) : (
+            <span className="text-slate-500 text-xs italic">Belum diselesaikan</span>
+          )}
+        </div>
+      </div>
+
+      <div className="flex justify-end pt-4 border-t border-slate-700">
+        <button 
+          onClick={onNext}
+          className="bg-slate-800 hover:bg-slate-700 text-white font-bold px-5 py-2.5 rounded-xl border border-slate-600 flex items-center gap-2 text-xs"
+        >
+          Lanjut ke Misi 3 <ArrowRight className="w-4 h-4" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// --- MISSION 3 VIEW ---
+function Mission3View({ onNext, addPoints, completed }) {
+  const [num1, setNum1] = useState(10);
+  const [num2, setNum2] = useState(5);
+  const [operator, setOperator] = useState('+');
+
+  const calcResult = useMemo(() => {
+    const n1 = parseFloat(num1) || 0;
+    const n2 = parseFloat(num2) || 0;
+    if (operator === '+') return n1 + n2;
+    if (operator === '-') return n1 - n2;
+    if (operator === '*') return n1 * n2;
+    if (operator === '/') return n2 === 0 ? '#DIV/0!' : n1 / n2;
+    return 0;
+  }, [num1, num2, operator]);
+
+  const formulaText = `=A1${operator}B1`;
+
+  const initialCalcGrid = [
+    ['12', '4', '=A1+B1'],
+    ['25', '5', '=A2/B2'],
+    ['8', '7', '=A3*B3']
+  ];
+
+  return (
+    <div className="space-y-6 animate-fadeIn">
+      <div className="border-b border-slate-700 pb-4">
+        <span className="text-xs font-bold text-emerald-400 uppercase tracking-wider">HALAMAN 3</span>
+        <h1 className="text-2xl font-bold text-white">Excel sebagai Kalkulator Matematika</h1>
+      </div>
+
+      <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 space-y-2">
+        <h3 className="font-bold text-amber-300 text-sm">Aturan Rumus Matematika Excel</h3>
+        <p className="text-xs text-slate-300 leading-relaxed">
+          Semua rumus dalam Excel <strong className="text-white">WAJIB diawali dengan tanda sama dengan (=)</strong>. 
+          Operator dasar meliputi: Penjumlahan (<code className="text-amber-300">+</code>), Pengurangan (<code className="text-amber-300">-</code>), Perkalian (<code className="text-amber-300">*</code>), dan Pembagian (<code className="text-amber-300">/</code>).
+        </p>
+      </div>
+
+      {/* Basic Calculator Widget */}
+      <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 space-y-4">
+        <h3 className="font-bold text-white text-sm flex items-center gap-2">
+          <Calculator className="w-4 h-4 text-emerald-400" /> Widget Kalkulator Rumus Excel
+        </h3>
+
+        <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-center">
+          <div>
+            <label className="text-[10px] text-slate-400 block mb-1">Cell A1 (Angka 1)</label>
+            <input 
+              type="number" 
+              value={num1} 
+              onChange={e => setNum1(e.target.value)}
+              className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-white font-mono text-sm focus:outline-none focus:border-emerald-500"
+            />
+          </div>
+          <div>
+            <label className="text-[10px] text-slate-400 block mb-1">Operator</label>
+            <select 
+              value={operator} 
+              onChange={e => setOperator(e.target.value)}
+              className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-amber-300 font-mono font-bold text-sm focus:outline-none"
+            >
+              <option value="+">+ (Tambah)</option>
+              <option value="-">- (Kurang)</option>
+              <option value="*">* (Kali)</option>
+              <option value="/">/ (Bagi)</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-[10px] text-slate-400 block mb-1">Cell B1 (Angka 2)</label>
+            <input 
+              type="number" 
+              value={num2} 
+              onChange={e => setNum2(e.target.value)}
+              className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-white font-mono text-sm focus:outline-none focus:border-emerald-500"
+            />
+          </div>
+          <div className="bg-slate-900 p-3 rounded-lg border border-slate-700 text-center">
+            <span className="text-[10px] text-slate-400 block">Hasil di Cell C1</span>
+            <span className="text-lg font-bold text-emerald-400 font-mono">{calcResult}</span>
+          </div>
+        </div>
+
+        <div className="bg-slate-900/80 p-3 rounded-lg border border-slate-700 flex flex-wrap items-center justify-between text-xs">
+          <div>
+            <span className="text-slate-400">Rumus Penulisan Excel: </span>
+            <code className="text-amber-300 font-mono font-bold ml-1">{formulaText}</code>
+          </div>
+          <span className="text-slate-500 italic text-[11px]">Cobalah bagi dengan 0 untuk melihat error #DIV/0!</span>
+        </div>
+      </div>
+
+      {/* Spreadsheet Simulator Practice */}
+      <div className="space-y-3">
+        <h3 className="font-bold text-white text-base">Praktik Menggunakan Grid Spreadsheet</h3>
+        <p className="text-xs text-slate-300">
+          Coba ketik rumus matematika seperti <code className="text-amber-300 font-mono">=A1+B1</code> atau <code className="text-amber-300 font-mono">=A2*B2</code> pada kolom C!
+        </p>
+        <InteractiveExcelGrid 
+          initialData={initialCalcGrid}
+          columns={['A', 'B', 'C']}
+          rowCount={4}
+          challengeCheck={(grid, computed) => {
+            const hasFormula = grid.some(row => row.some(cell => String(cell).startsWith('=')));
+            if (hasFormula && !completed) {
+              addPoints(300, 'm3');
+            }
+            return (
+              <div className="text-xs text-emerald-400 font-semibold">
+                {hasFormula ? "✔ Rumus matematika terdeteksi! (+300 XP)" : "Ketik rumus diawali '=' di salah satu sel C."}
+              </div>
+            );
+          }}
+        />
+      </div>
+
+      <div className="flex justify-end pt-4 border-t border-slate-700">
+        <button 
+          onClick={onNext}
+          className="bg-slate-800 hover:bg-slate-700 text-white font-bold px-5 py-2.5 rounded-xl border border-slate-600 flex items-center gap-2 text-xs"
+        >
+          Lanjut ke Misi 4 <ArrowRight className="w-4 h-4" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// --- MISSION 4 VIEW ---
+function Mission4View({ onNext, addPoints, completed }) {
+  const sumData = [
+    ['Buku', '10'],
+    ['Pensil', '15'],
+    ['Pulpen', '20'],
+    ['Penghapus', '8'],
+    ['Penggaris', '7'],
+    ['TOTAL', '=SUM(B1:B5)']
+  ];
+
+  return (
+    <div className="space-y-6 animate-fadeIn">
+      <div className="border-b border-slate-700 pb-4">
+        <span className="text-xs font-bold text-emerald-400 uppercase tracking-wider">HALAMAN 4</span>
+        <h1 className="text-2xl font-bold text-white">Menguasai Fungsi SUM (Penjumlahan Otomatis)</h1>
+      </div>
+
+      <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 space-y-3">
+        <h3 className="font-bold text-amber-300 text-sm">Mengapa Menggunakan SUM?</h3>
+        <p className="text-xs text-slate-300 leading-relaxed">
+          Daripada menjumlahkan satu per satu seperti <code className="text-red-400 font-mono">=B1+B2+B3+B4+B5</code>, 
+          kita bisa menggunakan fungsi <strong className="text-emerald-400 font-mono">=SUM(B1:B5)</strong> untuk menjumlahkan seluruh rentang sel secara cepat!
+        </p>
+      </div>
+
+      <InteractiveExcelGrid 
+        initialData={sumData}
+        columns={['A', 'B']}
+        rowCount={6}
+        title="Simulator Praktik SUM Penjualan Barang"
+        challengeCheck={(grid, computed) => {
+          const totalVal = computed[5]?.[1];
+          const isCorrect = totalVal === 60;
+          if (isCorrect && !completed) {
+            addPoints(400, 'm4');
+          }
+          return (
+            <div className="w-full flex items-center justify-between text-xs">
+              <span>Status Perhitungan Total:</span>
+              <span className={`font-bold ${isCorrect ? 'text-emerald-400' : 'text-amber-400'}`}>
+                {isCorrect ? '✔ SUM Berhasil! Total Penjualan = 60 (+400 XP)' : 'Pastikan cell B6 diisi dengan =SUM(B1:B5)'}
+              </span>
+            </div>
+          );
+        }}
+      />
+
+      <div className="flex justify-end pt-4 border-t border-slate-700">
+        <button 
+          onClick={onNext}
+          className="bg-slate-800 hover:bg-slate-700 text-white font-bold px-5 py-2.5 rounded-xl border border-slate-600 flex items-center gap-2 text-xs"
+        >
+          Lanjut ke Misi 5 <ArrowRight className="w-4 h-4" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// --- MISSION 5 VIEW ---
+function Mission5View({ onNext, addPoints, completed }) {
+  const statData = [
+    ['Andi', '85'],
+    ['Budi', '90'],
+    ['Citra', '75'],
+    ['Dina', '95'],
+    ['Eko', '80'],
+    ['Rata-Rata', '=AVERAGE(B1:B5)'],
+    ['Nilai Min', '=MIN(B1:B5)'],
+    ['Nilai Max', '=MAX(B1:B5)']
+  ];
+
+  return (
+    <div className="space-y-6 animate-fadeIn">
+      <div className="border-b border-slate-700 pb-4">
+        <span className="text-xs font-bold text-emerald-400 uppercase tracking-wider">HALAMAN 5</span>
+        <h1 className="text-2xl font-bold text-white">Fungsi Statistik: AVERAGE, MIN, dan MAX</h1>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="bg-slate-800 p-4 rounded-xl border border-slate-700 space-y-1">
+          <h4 className="font-bold text-emerald-400 text-xs">AVERAGE(range)</h4>
+          <p className="text-[11px] text-slate-300">Menghitung nilai rata-rata dari rentang angka.</p>
+          <code className="text-amber-300 text-[10px] block font-mono font-bold">=AVERAGE(B1:B5)</code>
+        </div>
+        <div className="bg-slate-800 p-4 rounded-xl border border-slate-700 space-y-1">
+          <h4 className="font-bold text-indigo-400 text-xs">MIN(range)</h4>
+          <p className="text-[11px] text-slate-300">Mencari nilai terkecil/paling rendah.</p>
+          <code className="text-amber-300 text-[10px] block font-mono font-bold">=MIN(B1:B5)</code>
+        </div>
+        <div className="bg-slate-800 p-4 rounded-xl border border-slate-700 space-y-1">
+          <h4 className="font-bold text-amber-400 text-xs">MAX(range)</h4>
+          <p className="text-[11px] text-slate-300">Mencari nilai terbesar/paling tinggi.</p>
+          <code className="text-amber-300 text-[10px] block font-mono font-bold">=MAX(B1:B5)</code>
+        </div>
+      </div>
+
+      <InteractiveExcelGrid 
+        initialData={statData}
+        columns={['A', 'B']}
+        rowCount={8}
+        title="Simulator Analisis Nilai Siswa"
+        challengeCheck={(grid, computed) => {
+          const avg = computed[5]?.[1];
+          const min = computed[6]?.[1];
+          const max = computed[7]?.[1];
+          const allCorrect = avg === 85 && min === 75 && max === 95;
+
+          if (allCorrect && !completed) addPoints(500, 'm5');
+
+          return (
+            <div className="w-full flex items-center justify-between text-xs">
+              <span className="text-slate-400">Hasil Analisis Nilai:</span>
+              <span className={`font-bold ${allCorrect ? 'text-emerald-400' : 'text-amber-400'}`}>
+                {allCorrect 
+                  ? '✔ Sempurna! AVERAGE=85, MIN=75, MAX=95 (+500 XP)' 
+                  : 'Lengkapi rumus pada B6 (AVERAGE), B7 (MIN), B8 (MAX)'}
+              </span>
+            </div>
+          );
+        }}
+      />
+
+      <div className="flex justify-end pt-4 border-t border-slate-700">
+        <button 
+          onClick={onNext}
+          className="bg-slate-800 hover:bg-slate-700 text-white font-bold px-5 py-2.5 rounded-xl border border-slate-600 flex items-center gap-2 text-xs"
+        >
+          Lanjut ke Misi 6 <ArrowRight className="w-4 h-4" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// --- MISSION 6 VIEW ---
+function Mission6View({ onNext, addPoints, completed }) {
+  const ifData = [
+    ['Andi', '85', '=IF(B1>=75,"Lulus","Belum Lulus")'],
+    ['Budi', '65', '=IF(B2>=75,"Lulus","Belum Lulus")'],
+    ['Citra', '90', '=IF(B3>=75,"Lulus","Belum Lulus")'],
+    ['Dina', '70', '=IF(B4>=75,"Lulus","Belum Lulus")'],
+    ['Eko', '78', '=IF(B5>=75,"Lulus","Belum Lulus")']
+  ];
+
+  return (
+    <div className="space-y-6 animate-fadeIn">
+      <div className="border-b border-slate-700 pb-4">
+        <span className="text-xs font-bold text-emerald-400 uppercase tracking-wider">HALAMAN 6</span>
+        <h1 className="text-2xl font-bold text-white">Logika Keputusan dengan Fungsi IF</h1>
+      </div>
+
+      <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 space-y-3">
+        <h3 className="font-bold text-amber-300 text-sm">Struktur Fungsi Logika IF</h3>
+        <p className="text-xs text-slate-300 leading-relaxed">
+          Fungsi <strong className="text-white">IF</strong> digunakan untuk menguji kondisi logika tertentu:
+        </p>
+        <div className="bg-slate-900 p-3 rounded-lg text-xs font-mono text-amber-300 border border-slate-700">
+          =IF(kondisi, "Nilai_Jika_Benar", "Nilai_Jika_Salah")
+        </div>
+        <p className="text-xs text-slate-400">
+          Contoh: <code className="text-emerald-300 font-mono">=IF(B1&gt;=75, "Lulus", "Belum Lulus")</code>
+        </p>
+      </div>
+
+      <InteractiveExcelGrid 
+        initialData={ifData}
+        columns={['A', 'B', 'C']}
+        rowCount={5}
+        title="Simulator Penentuan Kelulusan Siswa"
+        challengeCheck={(grid, computed) => {
+          const isCorrect = computed[0]?.[2] === 'Lulus' && computed[1]?.[2] === 'Belum Lulus';
+          if (isCorrect && !completed) addPoints(600, 'm6');
+
+          return (
+            <div className="w-full flex items-center justify-between text-xs">
+              <span className="text-slate-400">Status Kelulusan Otomatis:</span>
+              <span className={`font-bold ${isCorrect ? 'text-emerald-400' : 'text-amber-400'}`}>
+                {isCorrect ? '✔ Logika IF Berhasil Diuji! (+600 XP)' : 'Pastikan rumus IF bekerja di Kolom C'}
+              </span>
+            </div>
+          );
+        }}
+      />
+
+      <div className="flex justify-end pt-4 border-t border-slate-700">
+        <button 
+          onClick={onNext}
+          className="bg-slate-800 hover:bg-slate-700 text-white font-bold px-5 py-2.5 rounded-xl border border-slate-600 flex items-center gap-2 text-xs"
+        >
+          Lanjut ke Final Challenge <ArrowRight className="w-4 h-4" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// --- MISSION 7 VIEW (FINAL CAPSTONE) ---
+function Mission7View({ addPoints, completed }) {
+  const [ans1, setAns1] = useState('');
+  const [ans2, setAns2] = useState('');
+  const [ans3, setAns3] = useState('');
+  const [ans4, setAns4] = useState('');
+  const [conclusion, setConclusion] = useState('');
+  const [submitted, setSubmitted] = useState(false);
+
+  const initialKantinData = [
+    ['Nasi Goreng', '20', '10000', '=B1*C1', '=IF(B1>=15,"Laris","Biasa")'],
+    ['Es Teh', '35', '3000', '=B2*C2', '=IF(B2>=15,"Laris","Biasa")'],
+    ['Roti Bakar', '12', '6000', '=B3*C3', '=IF(B3>=15,"Laris","Biasa")'],
+    ['Mie Ayam', '25', '12000', '=B4*C4', '=IF(B4>=15,"Laris","Biasa")'],
+    ['Air Mineral', '40', '2000', '=B5*C5', '=IF(B5>=15,"Laris","Biasa")'],
+    ['TOTAL REVENUE', '', '', '=SUM(D1:D5)', ''],
+    ['RATA-RATA TERJUAL', '=AVERAGE(B1:B5)', '', '', ''],
+    ['TERJUAL TERBANYAK', '=MAX(B1:B5)', '', '', '']
+  ];
+
+  const handleSubmitQuiz = () => {
+    setSubmitted(true);
+    if (!completed) {
+      addPoints(800, 'm7');
+    }
+  };
+
+  return (
+    <div className="space-y-6 animate-fadeIn pb-12">
+      <div className="border-b border-slate-700 pb-4">
+        <span className="text-xs font-bold text-amber-400 uppercase tracking-wider">HALAMAN 7 - FINAL CHALLENGE</span>
+        <h1 className="text-2xl font-bold text-white">Studi Kasus: Pengelola Kantin Sekolah</h1>
+      </div>
+
+      <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 space-y-3">
+        <h3 className="font-bold text-amber-300 text-sm">Skenario Misi Utama</h3>
+        <p className="text-xs text-slate-300 leading-relaxed">
+          Kamu ditunjuk sebagai manajer data Kantin Sekolah! Tugasmu adalah mengolah tabel penjualan di bawah ini menggunakan 
+          rumus perkalian (<code className="text-amber-300 font-mono">*</code>), <code className="text-amber-300 font-mono">SUM</code>, 
+          <code className="text-amber-300 font-mono">AVERAGE</code>, <code className="text-amber-300 font-mono">MAX</code>, dan 
+          <code className="text-amber-300 font-mono">IF</code>, kemudian menjawab pertanyaan analisis.
+        </p>
+      </div>
+
+      {/* Final Excel Grid */}
+      <InteractiveExcelGrid 
+        initialData={initialKantinData}
+        columns={['Nama Barang', 'Qty (B)', 'Harga (C)', 'Total Rp (D)', 'Status (E)']}
+        rowCount={8}
+        title="Laporan Data Keuangan Kantin Sekolah"
+      />
+
+      {/* Synthesis Quiz */}
+      <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 space-y-4">
+        <h3 className="font-bold text-white text-base flex items-center gap-2">
+          <HelpCircle className="w-5 h-5 text-emerald-400" /> Kuis Analisis Sintesis Data Kantin
+        </h3>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+          <div>
+            <label className="text-slate-300 block font-semibold mb-1">1. Barang apakah yang paling banyak terjual (Qty tertinggi)?</label>
+            <input 
+              type="text" 
+              value={ans1} 
+              onChange={e => setAns1(e.target.value)}
+              placeholder="Jawab nama barang..."
+              className="w-full bg-slate-900 border border-slate-700 rounded p-2.5 text-white focus:outline-none focus:border-emerald-500"
+            />
+          </div>
+          <div>
+            <label className="text-slate-300 block font-semibold mb-1">2. Barang apakah yang menghasilkan total pendapatan tertinggi?</label>
+            <input 
+              type="text" 
+              value={ans2} 
+              onChange={e => setAns2(e.target.value)}
+              placeholder="Jawab nama barang..."
+              className="w-full bg-slate-900 border border-slate-700 rounded p-2.5 text-white focus:outline-none focus:border-emerald-500"
+            />
+          </div>
+          <div>
+            <label className="text-slate-300 block font-semibold mb-1">3. Berapa total keseluruhan pendapatan kantin (Cell D6)?</label>
+            <input 
+              type="text" 
+              value={ans3} 
+              onChange={e => setAns3(e.target.value)}
+              placeholder="Misal: 657000..."
+              className="w-full bg-slate-900 border border-slate-700 rounded p-2.5 text-white focus:outline-none focus:border-emerald-500"
+            />
+          </div>
+          <div>
+            <label className="text-slate-300 block font-semibold mb-1">4. Berapa rata-rata jumlah barang terjual (Cell B7)?</label>
+            <input 
+              type="text" 
+              value={ans4} 
+              onChange={e => setAns4(e.target.value)}
+              placeholder="Misal: 26.4..."
+              className="w-full bg-slate-900 border border-slate-700 rounded p-2.5 text-white focus:outline-none focus:border-emerald-500"
+            />
+          </div>
+        </div>
+
+        <div>
+          <label className="text-slate-300 text-xs block font-semibold mb-1">
+            5. Tuliskan Kesimpulan & Rekomendasi Kamu untuk Kantin Sekolah:
+          </label>
+          <textarea
+            rows={3}
+            value={conclusion}
+            onChange={e => setConclusion(e.target.value)}
+            placeholder="Berikan saran barang apa yang perlu ditambah stoknya berdasarkan data di atas..."
+            className="w-full bg-slate-900 border border-slate-700 rounded p-2.5 text-xs text-white focus:outline-none focus:border-emerald-500"
+          ></textarea>
+        </div>
+
+        <button
+          onClick={handleSubmitQuiz}
+          className="bg-amber-400 hover:bg-amber-300 text-slate-950 font-extrabold px-6 py-3 rounded-xl shadow-lg shadow-amber-400/20 text-xs flex items-center gap-2"
+        >
+          <Award className="w-4 h-4" /> KUMPULKAN LAPORAN FINAL & SERTIFIKAT
+        </button>
+
+        {submitted && (
+          <div className="bg-emerald-950/40 border border-emerald-500/50 p-6 rounded-xl text-center space-y-3 animate-fadeIn">
+            <Trophy className="w-12 h-12 text-amber-400 mx-auto animate-bounce" />
+            <h2 className="text-xl font-extrabold text-white">SELAMAT! KAMU RESMI MENJADI AHLI ANALISIS DATA!</h2>
+            <p className="text-xs text-emerald-200">
+              Kamu telah menyelesaikan seluruh 7 misi dalam proyek Excel Data Adventure Informatika Kelas VIII SMP dengan Sukses! (+800 XP)
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
